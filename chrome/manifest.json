@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Subtitle TTS Reader",
+  "version": "1.0.0",
+  "description": "Đọc phụ đề YouTube bằng Web Speech API hoặc Local TTS AI Server (Piper/Kokoro)",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/interceptor.js"],
+      "matches": ["*://*.youtube.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

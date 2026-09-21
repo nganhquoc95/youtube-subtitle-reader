@@ -1,0 +1,13 @@
+{
+    "name": "youtube-tts",
+    "version": "1.0.0",
+    "description": "",
+    "main": "index.js",
+    "scripts": {
+        "dev": "tailwindcss -i ./chrome/src/input.css -o ./chrome/src/styles.css --watch",
+        "build": "tailwindcss -i ./chrome/src/input.css -o ./chrome/src/styles.css --minify"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC"
+}
