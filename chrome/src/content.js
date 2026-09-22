@@ -15,23 +15,14 @@
   let isWsConnected = false;
 
   // Quản lý Audio & Pre-fetch Cache
-  let audioCtx = null;
+  const PREFETCH_COUNT = 5;
+  const MAX_AUDIO_CACHE_SIZE = 30;
   let audioCache = new Map(); // Key (text) -> AudioBuffer
   let pendingPlayText = null;
   let currentSourceNode = null;
   let subtitleTrack = []; // Danh sách toàn bộ sub track lấy tự động
   let lastSubText = "";
   let currentIncomingId = null;
-
-  function getAudioContext() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
-    return audioCtx;
-  }
 
   // --- 1. Đồng bộ Cài đặt từ Chrome Storage ---
   chrome.storage.sync.get(
@@ -124,19 +115,40 @@
     }));
   }
 
-  // Pre-fetch trước 2 câu phụ đề tiếp theo
-  function prefetchSubtitles(currentIndex) {
-    if (!subtitleTrack || subtitleTrack.length === 0) {
-      console.warn("[TTS Pre-fetch] Bỏ qua pre-fetch do subtitleTrack đang rỗng.");
-      return;
-    }
+  // Hàm dọn dẹp bộ nhớ cache nếu vượt ngưỡng
+  function cleanupAudioCache() {
+    if (audioCache.size > MAX_AUDIO_CACHE_SIZE) {
+      // Xóa bớt các câu cũ nhất trong Map
+      const keysToDeleteCount = audioCache.size - MAX_AUDIO_CACHE_SIZE;
+      const keys = Array.from(audioCache.keys());
 
-    for (let i = 1; i <= 2; i++) {
-      const nextSub = subtitleTrack[currentIndex + i];
-      if (nextSub && nextSub.text) {
-        if (!audioCache.has(nextSub.text)) {
-          console.log(`🚀 [TTS Pre-fetch] Đang tải trước câu (+${i}): "${nextSub.text}"`);
-          requestTTS(nextSub.text, "prefetch");
+      for (let i = 0; i < keysToDeleteCount; i++) {
+        // Tránh xóa câu hiện tại đang phát
+        if (keys[i] !== lastSubText) {
+          audioCache.delete(keys[i]);
+        }
+      }
+    }
+  }
+
+  // Pre-fetch trước phụ đề tiếp theo
+  function prefetchSubtitles(currentIndex) {
+    if (!subtitleTrack || subtitleTrack.length === 0) return;
+
+    // Dọn dẹp cache cũ nếu đầy
+    cleanupAudioCache();
+
+    for (let i = 1; i <= PREFETCH_COUNT; i++) {
+      const nextIndex = currentIndex + i;
+
+      if (nextIndex < subtitleTrack.length) {
+        const nextItem = subtitleTrack[nextIndex];
+        const nextText = nextItem.text;
+
+        // Chỉ gửi request pre-fetch nếu câu này chưa có trong Cache
+        if (nextText && !audioCache.has(nextText)) {
+          // console.log(`🚀 [Pre-fetch ${i}/${PREFETCH_COUNT}] Gửi request cho câu: "${nextText}"`);
+          requestTTS(nextText, "prefetch");
         }
       }
     }
