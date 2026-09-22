@@ -41,7 +41,7 @@ def generate_wav_bytes(text: str, voice: str = "Mai Anh", speed: float = 1.2) ->
         return tts_cache[cache_key]
 
     print(f"🎙️ [VieNeu-TTS] Đang tổng hợp âm thanh: '{text}' (Giọng: {voice})")
-    audio_data = tts_engine.infer(text, voice=voice)
+    audio_data = tts_engine.infer(text, voice=voice, steps=8, sway=-1)
 
     sample_rate = getattr(tts_engine, "sample_rate", 24000)
     buffer = io.BytesIO()
