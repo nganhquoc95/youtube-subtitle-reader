@@ -144,6 +144,12 @@ The extension manifest points to the YouTube domain and allows local connections
 - Confirm the selected engine and voice are valid.
 - Inspect the browser console for any WebSocket or playback errors.
 
+## Support the project
+
+If this project is useful to you, you can support its continued development with a small donation. Thank you for your support!
+
+![Donate via TPBank](assets/tpbank.jpg)
+
 ## License
 
 This project is provided as-is for educational and personal use.

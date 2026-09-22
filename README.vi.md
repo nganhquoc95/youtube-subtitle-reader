@@ -144,6 +144,12 @@ Manifest của tiện ích đã được cấu hình để hoạt động với 
 - Xác nhận engine và giọng đọc đã chọn hợp lệ.
 - Mở console trình duyệt để xem lỗi WebSocket hoặc lỗi phát âm.
 
+## Ủng hộ dự án
+
+Nếu dự án hữu ích với bạn, bạn có thể ủng hộ một khoản nhỏ để mình tiếp tục phát triển. Cảm ơn bạn rất nhiều!
+
+![Ủng hộ qua TPBank](assets/tpbank.jpg)
+
 ## Giấy phép
 
 Dự án này được cung cấp theo dạng "as-is" cho mục đích học tập và sử dụng cá nhân.
