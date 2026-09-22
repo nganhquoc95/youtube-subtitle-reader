@@ -4,13 +4,57 @@
 import io
 import json
 import asyncio
+import os
+import traceback
+from pathlib import Path
 import numpy as np
 import scipy.io.wavfile as wavfile
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+
+# Keep downloaded VieNeu/Hugging Face files outside PyInstaller's temporary
+# extraction directory so the model is downloaded only on the first launch.
+_default_cache_root = Path(os.getenv("LOCALAPPDATA", Path.home())) / "YoutubeTTS" / "huggingface"
+_model_dir = Path(os.getenv("LOCALAPPDATA", Path.home())) / "YoutubeTTS" / "models" / "v3nano"
+_model_repo = "pnnbao-ump/VieNeu-TTS-v3-Nano"
+_model_files = (
+    "text_encoder.onnx",
+    "duration_predictor.onnx",
+    "vector_estimator.onnx",
+    "codec_decoder.onnx",
+    "config.json",
+    "constants.npz",
+)
+os.environ.setdefault("HF_HOME", str(_default_cache_root))
+os.environ.setdefault("HF_HUB_CACHE", str(_default_cache_root / "hub"))
+Path(os.environ["HF_HUB_CACHE"]).mkdir(parents=True, exist_ok=True)
+
+from huggingface_hub import snapshot_download
 from vieneu import Vieneu
+
+
+def prepare_vieneu_model() -> str:
+    """Download the Nano bundle into a stable directory for packaged runs."""
+    missing_files = [name for name in _model_files if not (_model_dir / name).is_file()]
+    if missing_files:
+        print(f"⏳ Đang tải model VieNeu vào: {_model_dir}")
+        _model_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=_model_repo,
+            repo_type="model",
+            local_dir=str(_model_dir),
+            cache_dir=os.environ["HF_HUB_CACHE"],
+        )
+
+    missing_files = [name for name in _model_files if not (_model_dir / name).is_file()]
+    if missing_files:
+        raise FileNotFoundError(
+            f"VieNeu model is incomplete in {_model_dir}: {', '.join(missing_files)}"
+        )
+    return str(_model_dir)
 
 app = FastAPI(title="VieNeu-TTS Local WebSocket Server for YouTube Subtitles")
 
@@ -25,7 +69,7 @@ app.add_middleware(
 
 # Khởi tạo mô hình VieNeu-TTS
 print("⏳ Đang khởi tạo mô hình VieNeu-TTS...")
-tts_engine = Vieneu(mode="v3nano")
+tts_engine = Vieneu(mode="v3nano", onnx_dir=prepare_vieneu_model())
 print("✅ VieNeu-TTS Engine sẵn sàng!")
 
 # Bộ đệm Cache / Pre-fetch cho âm thanh đã sinh trước
@@ -37,11 +81,10 @@ MAX_CACHE_SIZE = 100
 def generate_wav_bytes(text: str, voice: str = "Mai Anh", speed: float = 1.2) -> bytes:
     cache_key = (text.strip(), voice, speed)
     if cache_key in tts_cache:
-        print(f"⚡ [Cache Hit] Trả về audio pre-fetch cho câu: '{text}'")
         return tts_cache[cache_key]
 
     print(f"🎙️ [VieNeu-TTS] Đang tổng hợp âm thanh: '{text}' (Giọng: {voice})")
-    audio_data = tts_engine.infer(text, voice=voice, steps=8, sway=-1)
+    audio_data = tts_engine.infer(text, voice=voice, threads=4, steps=8, sway=-1)
 
     sample_rate = getattr(tts_engine, "sample_rate", 24000)
     buffer = io.BytesIO()
@@ -124,6 +167,7 @@ async def websocket_tts_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print("🔌 [WebSocket] Client ngắt kết nối.")
     except Exception as e:
+        traceback.print_exc()
         print(f"❌ [WebSocket Lỗi]: {str(e)}")
 
 

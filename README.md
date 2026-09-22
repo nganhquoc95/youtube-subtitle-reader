@@ -47,6 +47,11 @@ Install Python dependencies:
 pip install fastapi uvicorn scipy numpy vieneu
 ```
 
+The VieNeu model is downloaded automatically from Hugging Face on the first
+server launch. The downloaded files are kept in `%LOCALAPPDATA%\YoutubeTTS\huggingface`
+on Windows (or the equivalent `LOCALAPPDATA` location), so subsequent launches
+reuse the local cache.
+
 ### Node.js (for extension CSS build)
 
 - Node.js and npm
@@ -64,6 +69,16 @@ From the project root:
 ```bash
 python server.py
 ```
+
+To build a standalone one-file executable:
+
+```bash
+pyinstaller --clean --noconfirm server.spec
+```
+
+Run `dist/server.exe` while connected to the internet the first time. Model
+download and initialization happen before the server starts; later launches
+reuse the cached model.
 
 The server starts on:
 

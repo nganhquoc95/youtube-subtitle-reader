@@ -47,6 +47,10 @@ Cài đặt thư viện Python:
 pip install fastapi uvicorn scipy numpy vieneu
 ```
 
+Model VieNeu sẽ tự động được tải từ Hugging Face ở lần đầu khởi động server.
+Trên Windows, model được lưu trong `%LOCALAPPDATA%\YoutubeTTS\huggingface` để
+các lần chạy sau dùng lại cache thay vì tải lại.
+
 ### Node.js (dùng để build CSS cho extension)
 
 - Node.js và npm
@@ -64,6 +68,15 @@ Từ thư mục gốc của dự án:
 ```bash
 python server.py
 ```
+
+Để build thành file chạy độc lập dạng one-file:
+
+```bash
+pyinstaller --clean --noconfirm server.spec
+```
+
+Hãy chạy `dist/server.exe` khi có Internet ở lần đầu. Model sẽ được tải và khởi
+tạo trước khi server bắt đầu; các lần sau sẽ dùng model đã lưu trong cache.
 
 Máy chủ sẽ chạy tại:
 
