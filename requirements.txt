@@ -1,0 +1,14 @@
+fastapi==0.141.1
+huggingface_hub==1.32.0
+numpy==2.5.3
+PyQt6==6.11.0
+uvicorn==0.53.0
+scipy==1.18.1
+uvicorn==0.53.0
+torch==2.8.0
+torchaudio==2.8.0
+transformers==5.17.0
+vieneu==3.8.1
+websockets==11.0.3
+pyinstaller==6.22.3
+pystray==0.19.5

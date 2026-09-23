@@ -10,18 +10,26 @@ vieneu_datas = collect_data_files('vieneu') + collect_data_files('vieneu_utils')
 vieneu_hiddenimports = collect_submodules('vieneu') + collect_submodules('vieneu_utils')
 sea_g2p_datas = collect_data_files('sea_g2p')
 sea_g2p_hiddenimports = collect_submodules('sea_g2p')
+onnxruntime_hiddenimports = collect_submodules('onnxruntime')
 onnxruntime_binaries = collect_dynamic_libs('onnxruntime')
 onnxruntime_binaries.append((
     str(Path(onnxruntime.__file__).parent / 'capi' / 'onnxruntime_pybind11_state.pyd'),
     'onnxruntime/capi',
 ))
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
+torch_binaries = collect_dynamic_libs('torch') if torch else []
+
 a = Analysis(
     ['server.py'],
     pathex=[],
-    binaries=onnxruntime_binaries,
+    binaries=onnxruntime_binaries + torch_binaries,
     datas=vieneu_datas + sea_g2p_datas,
-    hiddenimports=vieneu_hiddenimports + sea_g2p_hiddenimports,
+    hiddenimports=vieneu_hiddenimports + sea_g2p_hiddenimports + onnxruntime_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

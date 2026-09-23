@@ -47,6 +47,30 @@ Cài đặt thư viện Python:
 pip install fastapi uvicorn scipy numpy vieneu
 ```
 
+Nếu dùng GPU NVIDIA, cài thêm CUDA extra và ONNX Runtime bản GPU:
+
+```bash
+pip install "vieneu[cuda]" onnxruntime-gpu fastapi uvicorn scipy numpy pystray Pillow
+```
+
+Nếu chỉ dùng CPU:
+
+```bash
+pip install vieneu fastapi uvicorn scipy numpy pystray Pillow
+```
+
+`v3nano` của VieNeu chỉ chạy CPU. Để chạy GPU, chọn backend v3 Turbo dùng
+PyTorch trước khi khởi động server:
+
+```powershell
+$env:VIENEU_MODE="v3turbo"
+$env:VIENEU_DEVICE="cuda"
+$env:VIENEU_BACKEND="pytorch"
+python server.py
+```
+
+Mặc định vẫn là `v3nano` để tương thích với model 24 kHz hiện tại.
+
 Model VieNeu sẽ tự động được tải từ Hugging Face ở lần đầu khởi động server.
 Trên Windows, model được lưu trong `%LOCALAPPDATA%\YoutubeTTS\huggingface` để
 các lần chạy sau dùng lại cache thay vì tải lại.
@@ -74,6 +98,27 @@ python server.py
 ```bash
 pyinstaller --clean --noconfirm server.spec
 ```
+
+Hãy build trong chính môi trường đã cài `vieneu[cuda]` và `onnxruntime-gpu`.
+File executable sẽ chứa các thư viện native VieNeu, ONNX Runtime và Torch đang
+có trong môi trường build; máy đích vẫn cần NVIDIA driver tương thích.
+
+## GUI launcher
+
+GUI launcher hỗ trợ bật/tắt GPU, hiện/ẩn console server, ẩn xuống system tray,
+khởi động cùng Windows và thoát ứng dụng. Chạy khi phát triển:
+
+```bash
+python launcher.py
+```
+
+Build launcher thành file GUI:
+
+```bash
+pyinstaller --clean --noconfirm launcher.spec
+```
+
+Đặt `dist\launcher.exe` cạnh `dist\server.exe`, sau đó chạy `launcher.exe`.
 
 Hãy chạy `dist/server.exe` khi có Internet ở lần đầu. Model sẽ được tải và khởi
 tạo trước khi server bắt đầu; các lần sau sẽ dùng model đã lưu trong cache.

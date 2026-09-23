@@ -47,6 +47,33 @@ Install Python dependencies:
 pip install fastapi uvicorn scipy numpy vieneu
 ```
 
+For NVIDIA GPU support, install the CUDA extra and the GPU build of ONNX
+Runtime:
+
+```bash
+pip install "vieneu[cuda]" onnxruntime-gpu fastapi uvicorn scipy numpy pystray Pillow
+```
+
+For CPU-only use:
+
+```bash
+pip install vieneu fastapi uvicorn scipy numpy pystray Pillow
+```
+
+`v3nano` is CPU-only in VieNeu. To use GPU, select the PyTorch-backed v3 Turbo
+backend before starting the server:
+
+Windows PowerShell:
+
+```powershell
+$env:VIENEU_MODE="v3turbo"
+$env:VIENEU_DEVICE="cuda"
+$env:VIENEU_BACKEND="pytorch"
+python server.py
+```
+
+The default remains `v3nano` for compatibility with the existing 24 kHz model.
+
 The VieNeu model is downloaded automatically from Hugging Face on the first
 server launch. The downloaded files are kept in `%LOCALAPPDATA%\YoutubeTTS\huggingface`
 on Windows (or the equivalent `LOCALAPPDATA` location), so subsequent launches
@@ -70,11 +97,36 @@ From the project root:
 python server.py
 ```
 
-To build a standalone one-file executable:
+To build the server as a one-file executable:
 
 ```bash
 pyinstaller --clean --noconfirm server.spec
 ```
+
+Build the executable in the same environment where `vieneu[cuda]` and
+`onnxruntime-gpu` are installed. The generated `dist\server.exe` includes the
+available VieNeu, ONNX Runtime, and Torch native libraries; the target machine
+still needs a compatible NVIDIA driver.
+
+## GUI launcher
+
+The GUI launcher can toggle GPU use, show or hide the server console, minimize
+to the system tray, start with Windows, and quit the application.
+
+Run during development:
+
+```bash
+python launcher.py
+```
+
+Build the launcher as a one-file executable:
+
+```bash
+pyinstaller --clean --noconfirm launcher.spec
+```
+
+The build creates `dist\launcher.exe` and `dist\server.exe`. Keep both files
+under the same `dist\` directory, then run `dist\launcher.exe`.
 
 Run `dist/server.exe` while connected to the internet the first time. Model
 download and initialization happen before the server starts; later launches

@@ -1,10 +1,12 @@
 # server.py - Local TTS Server bằng Python FastAPI, WebSocket & VieNeu-TTS
-# Cài đặt thư viện: pip install vieneu fastapi uvicorn scipy numpy
+# Cài đặt CPU: pip install vieneu fastapi uvicorn scipy numpy
+# Cài đặt GPU: pip install "vieneu[cuda]" onnxruntime-gpu fastapi uvicorn scipy numpy
 
 import io
 import json
 import asyncio
 import os
+import sys
 import traceback
 from pathlib import Path
 import numpy as np
@@ -14,12 +16,20 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+
 
 # Keep downloaded VieNeu/Hugging Face files outside PyInstaller's temporary
 # extraction directory so the model is downloaded only on the first launch.
 _default_cache_root = Path(os.getenv("LOCALAPPDATA", Path.home())) / "YoutubeTTS" / "huggingface"
 _model_dir = Path(os.getenv("LOCALAPPDATA", Path.home())) / "YoutubeTTS" / "models" / "v3nano"
 _model_repo = "pnnbao-ump/VieNeu-TTS-v3-Nano"
+_vieneu_mode = os.getenv("VIENEU_MODE", "v3nano").strip().lower()
+_vieneu_device = os.getenv("VIENEU_DEVICE", "auto").strip().lower()
+_vieneu_backend = os.getenv("VIENEU_BACKEND", "auto").strip().lower()
 _model_files = (
     "text_encoder.onnx",
     "duration_predictor.onnx",
@@ -56,6 +66,27 @@ def prepare_vieneu_model() -> str:
         )
     return str(_model_dir)
 
+
+def create_tts_engine() -> Vieneu:
+    if _vieneu_mode == "v3nano":
+        print("ℹ️ VieNeu v3 Nano chỉ chạy CPU (theo thiết kế của VieNeu).")
+        return Vieneu(mode="v3nano", onnx_dir=prepare_vieneu_model())
+
+    if _vieneu_mode == "v3turbo":
+        print(
+            f"ℹ️ VieNeu v3 Turbo: device={_vieneu_device}, "
+            f"backend={_vieneu_backend}"
+        )
+        return Vieneu(
+            mode="v3turbo",
+            device=_vieneu_device,
+            backend=_vieneu_backend,
+        )
+
+    raise ValueError(
+        "VIENEU_MODE phải là 'v3nano' (CPU) hoặc 'v3turbo' (CPU/GPU)."
+    )
+
 app = FastAPI(title="VieNeu-TTS Local WebSocket Server for YouTube Subtitles")
 
 # Bật CORS cho phép Chrome Extension truy cập
@@ -69,7 +100,7 @@ app.add_middleware(
 
 # Khởi tạo mô hình VieNeu-TTS
 print("⏳ Đang khởi tạo mô hình VieNeu-TTS...")
-tts_engine = Vieneu(mode="v3nano", onnx_dir=prepare_vieneu_model())
+tts_engine = create_tts_engine()
 print("✅ VieNeu-TTS Engine sẵn sàng!")
 
 # Bộ đệm Cache / Pre-fetch cho âm thanh đã sinh trước
