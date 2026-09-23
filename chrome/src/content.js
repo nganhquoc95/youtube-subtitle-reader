@@ -1,6 +1,6 @@
-// content.js - YouTube Subtitle TTS với Pre-fetch (Network Interceptor) & WebSocket Audio Stream
+// content.js - YouTube Subtitle TTS Hybrid Engine (Time-Sync & Live DOM Fallback)
 (function () {
-  console.log("YouTube Subtitle TTS Extension (WebSocket & Pre-fetch) loaded!");
+  console.log("🟢 YouTube Subtitle TTS Hybrid Engine Loaded!");
 
   // --- Cấu hình & Biến Trạng Thái ---
   let enabled = true;
@@ -15,24 +15,26 @@
   let socket = null;
   let isWsConnected = false;
 
-  // Quản lý Audio & Pre-fetch Cache
+  // Quản lý Subtitle & Audio
   const PREFETCH_COUNT = 5;
   const MAX_AUDIO_CACHE_SIZE = 30;
-  let audioCache = new Map(); // Key (text) -> AudioBuffer
-  let pendingPlayText = null;
-  let subtitleTrack = []; // Danh sách toàn bộ sub track
-  let lastSubText = "";
-  let currentIncomingId = null;
+  let audioCache = new Map(); // Key (text) -> ArrayBuffer
+  let subtitleTrack = [];     // Track sub đã xử lý từ Interceptor
+  let lastPlayedIndex = -1;   // Index câu vừa phát theo Time Sync
+  let lastSubText = "";       // Text vừa phát (cho DOM Fallback)
+  let pendingTTSKey = null;   // Key câu đang đợi WS phản hồi
+  let syncTimer = null;       // Timer đồng bộ thời gian
+  let debounceTimer = null;   // Debounce cho sub DOM tự động
 
-  // --- Quản lý Hàng chờ Audio Tuần tự (Queue Engine) ---
-  let audioQueue = []; 
+  // Quản lý Hàng chờ Audio
+  let audioQueue = [];
   let isPlayingAudio = false;
   let currentAudioElement = null;
   let currentVideoElement = null;
   let isSeeking = false;
-  let seekSessionId = 0;
+  let currentIncomingId = null;
 
-  // --- 1. Đồng bộ Cài đặt từ Chrome Storage ---
+  // --- 1. Đồng bộ Storage ---
   chrome.storage.sync.get(
     ["enabled", "engineType", "wsServerUrl", "voice", "rate", "pitch", "ducking", "sequentialQueue"],
     (data) => {
@@ -69,7 +71,7 @@
     if (changes.ducking) ducking = parseInt(changes.ducking.newValue) || 20;
   });
 
-  // --- 2. Quản lý WebSocket Server ---
+  // --- 2. WebSocket Manager ---
   function initWebSocket() {
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) return;
 
@@ -78,7 +80,7 @@
 
     socket.onopen = () => {
       isWsConnected = true;
-      console.log("[TTS WS] Đã kết nối Local WebSocket Server thành công.");
+      console.log("[TTS WS] Đã kết nối Local WebSocket Server.");
     };
 
     socket.onmessage = async (event) => {
@@ -93,16 +95,18 @@
 
           const video = currentVideoElement || document.querySelector('video');
           if (video && !video.paused && !video.seeking) {
-            enqueueAudio(currentIncomingId);
+            // NẾU ĐÂY LÀ CÂU ĐANG CHỜ PHÁT -> ĐẨY VÀO QUEUE NGAY
+            if (pendingTTSKey === currentIncomingId || !isPlayingAudio) {
+              enqueueAudio(currentIncomingId);
+              pendingTTSKey = null;
+            }
           }
-          pendingPlayText = null;
         }
       }
     };
 
     socket.onclose = () => {
       isWsConnected = false;
-      console.warn("[TTS WS] Mất kết nối WebSocket Server. Thử lại sau 3 giây...");
       setTimeout(() => {
         if (engineType === "localserver") initWebSocket();
       }, 3000);
@@ -113,7 +117,6 @@
     };
   }
 
-  // --- 3. Yêu cầu TTS & Pre-fetching ---
   function requestTTS(text, type = "read") {
     if (!isWsConnected || audioCache.has(text) || !text) return;
 
@@ -144,11 +147,8 @@
 
     for (let i = 1; i <= PREFETCH_COUNT; i++) {
       const nextIndex = currentIndex + i;
-
       if (nextIndex < subtitleTrack.length) {
-        const nextItem = subtitleTrack[nextIndex];
-        const nextText = nextItem.text;
-
+        const nextText = subtitleTrack[nextIndex].text;
         if (nextText && !audioCache.has(nextText)) {
           requestTTS(nextText, "prefetch");
         }
@@ -156,27 +156,104 @@
     }
   }
 
-  // --- 4. Queue Audio Engine (Xử lý Phát Tuần Tự hoặc Đè Trực Tiếp) ---
+  // --- 3. Hàm Làm Sạch & Khử Trùng Lặp Chuỗi ---
+  function cleanSubtitleText(text) {
+    if (!text) return "";
+    return text
+      .replace(/\[.*?\]|\(.*?\)/g, '') // Lọc sạch [âm nhạc], [cười], (nhạc)...
+      .replace(/\s+/g, ' ')           // Thu gọn khoảng trắng
+      .trim();
+  }
 
-  // Đẩy câu TTS mới vào luồng phát
+  // --- 4. ENGINE 1: Time-Sync Sync Engine (Uu tiên dùng khi có Track Sub) ---
+  function startSubSyncTimer() {
+    if (syncTimer) clearInterval(syncTimer);
+
+    syncTimer = setInterval(() => {
+      const video = currentVideoElement || document.querySelector('video');
+      if (!video || video.paused || video.seeking || !enabled || subtitleTrack.length === 0) return;
+
+      const currentTimeMs = video.currentTime * 1000;
+
+      // Tìm câu phụ đề kế tiếp chưa đọc phù hợp với mốc thời gian hiện tại (+ 2.5s bù trễ)
+      const currentIndex = subtitleTrack.findIndex((item, idx) => {
+        if (idx <= lastPlayedIndex) return false;
+        return currentTimeMs >= item.start && currentTimeMs <= (item.end + 2500);
+      });
+
+      if (currentIndex !== -1) {
+        lastPlayedIndex = currentIndex;
+        const subItem = subtitleTrack[currentIndex];
+        
+        console.log(`🎯 [TTS Time-Sync] Phát câu [${currentIndex}]: "${subItem.text}"`);
+        speakOrFetchText(subItem.text);
+        prefetchSubtitles(currentIndex);
+      }
+    }, 150);
+  }
+
+  // --- 5. ENGINE 2: Live DOM Observer Fallback (Cho Sub Auto đang gõ trực tiếp) ---
+  function processDOMSubtitleChange(rawText) {
+    // Nếu đã có Track Sub từ Interceptor thì Engine 1 sẽ đảm nhận, ngắt Observer
+    if (subtitleTrack.length > 0) return;
+
+    const cleanText = cleanSubtitleText(rawText);
+    const video = currentVideoElement || document.querySelector('video');
+
+    if (!enabled || !cleanText || cleanText === lastSubText ||
+      isSeeking || (video && video.paused)
+    ) return;
+
+    // Lọc trùng gối đầu (Nếu câu mới chứa nguyên văn câu cũ đang mở rộng)
+    if (cleanText.startsWith(lastSubText) && cleanText.length - lastSubText.length < 15) {
+      // Câu chưa hoàn chỉnh (chỉ mới thêm 1-2 từ), hủy bỏ timer cũ
+      if (debounceTimer) clearTimeout(debounceTimer);
+    }
+
+    if (debounceTimer) clearTimeout(debounceTimer);
+
+    // Chờ 450ms không có từ mới xuất hiện mới bắt đầu phát âm thanh
+    debounceTimer = setTimeout(() => {
+      lastSubText = cleanText;
+      console.log(`👁️ [TTS DOM Fallback] Đọc câu: "${cleanText}"`);
+      speakOrFetchText(cleanText);
+    }, 450);
+  }
+
+  function speakOrFetchText(text) {
+    if (!text) return;
+
+    if (engineType === "localserver") {
+      if (audioCache.has(text)) {
+        enqueueAudio(text);
+      } else {
+        pendingTTSKey = text;
+        requestTTS(text, "read");
+
+        if (!isWsConnected) {
+          speakViaWebSpeech(text);
+        }
+      }
+    } else {
+      speakViaWebSpeech(text);
+    }
+  }
+
+  // --- 6. Queue Audio Engine ---
   function enqueueAudio(textKey) {
     if (sequentialQueue) {
-      // [CHẾ ĐỘ TUẦN TỰ]: Thêm vào hàng chờ nếu chưa tồn tại
       if (!audioQueue.includes(textKey)) {
         audioQueue.push(textKey);
-        console.log(`📥 [TTS Queue] Thêm vào hàng chờ: "${textKey}". Số câu chờ: ${audioQueue.length}`);
       }
       if (!isPlayingAudio) {
         processNextInQueue();
       }
     } else {
-      // [CHẾ ĐỘ ĐÈ TRỰC TIẾP]: Dừng audio cũ, đọc câu mới ngay lập tức
       stopAudio();
       playBufferedAudioDirectly(textKey);
     }
   }
 
-  // Phát câu kế tiếp trong hàng chờ
   function processNextInQueue() {
     if (audioQueue.length === 0) {
       isPlayingAudio = false;
@@ -203,9 +280,7 @@
     const audioUrl = URL.createObjectURL(blob);
     const audio = new Audio(audioUrl);
 
-    const currentRate = parseFloat(rate) || 1.0;
-    audio.playbackRate = currentRate;
-
+    audio.playbackRate = parseFloat(rate) || 1.0;
     applyDucking();
 
     audio.onended = () => {
@@ -222,10 +297,6 @@
       processNextInQueue();
     };
 
-    audio.onloadedmetadata = () => {
-      audio.playbackRate = currentRate;
-    };
-
     audio.play().catch(err => {
       console.error("[TTS Queue Play Error]:", err);
       processNextInQueue();
@@ -234,7 +305,6 @@
     currentAudioElement = audio;
   }
 
-  // Phát trực tiếp (khi tắt sequentialQueue)
   function playBufferedAudioDirectly(textKey) {
     const arrayBuffer = audioCache.get(textKey);
     if (!arrayBuffer) return;
@@ -243,21 +313,13 @@
     const audioUrl = URL.createObjectURL(blob);
     const audio = new Audio(audioUrl);
 
-    const currentRate = parseFloat(rate) || 1.0;
-    audio.playbackRate = currentRate;
-
+    audio.playbackRate = parseFloat(rate) || 1.0;
     applyDucking();
 
     audio.onended = () => {
       resetVolume();
       URL.revokeObjectURL(audioUrl);
       audioCache.delete(textKey);
-      currentAudioElement = null;
-    };
-
-    audio.onerror = () => {
-      resetVolume();
-      URL.revokeObjectURL(audioUrl);
       currentAudioElement = null;
     };
 
@@ -282,21 +344,15 @@
     return false;
   }
 
-  // Dừng & làm sạch hoàn toàn Audio lẫn Hàng chờ (dùng khi Seek, Video Pause hoặc Chuyển Trang)
   function stopAudio() {
-    // 1. Dọn dẹp hàng chờ
     audioQueue = [];
     isPlayingAudio = false;
 
-    // 2. Ngắt audio đang phát
     if (currentAudioElement) {
       try {
-        currentAudioElement.onerror = null;
-        currentAudioElement.onended = null;
         currentAudioElement.pause();
         currentAudioElement.currentTime = 0;
         currentAudioElement.src = "";
-        currentAudioElement.load();
       } catch (e) { }
       currentAudioElement = null;
     }
@@ -325,9 +381,9 @@
     window.speechSynthesis.speak(utterance);
   }
 
-  // --- 5. Audio Ducking ---
+  // --- 7. Audio Ducking ---
   function applyDucking() {
-    const video = document.querySelector('video');
+    const video = currentVideoElement || document.querySelector('video');
     if (video) {
       if (video.dataset.origVol === undefined) {
         video.dataset.origVol = video.volume;
@@ -337,183 +393,113 @@
   }
 
   function resetVolume() {
-    const video = document.querySelector('video');
+    const video = currentVideoElement || document.querySelector('video');
     if (video && video.dataset.origVol !== undefined) {
       video.volume = parseFloat(video.dataset.origVol);
     }
   }
 
-  // --- 6. Nhận Diện Phụ Đề & Bắt Sự Kiện Video ---
-  function processSubtitleChange(fullText) {
-    const video = currentVideoElement || document.querySelector('video');
-
-    if (!enabled || !fullText || fullText === lastSubText ||
-      isSeeking || (video && video.paused)
-    ) return;
-
-    lastSubText = fullText;
-    speakOrFetchText(fullText);
-  }
-
-  function speakOrFetchText(text) {
-    if (!text) return;
-
-    if (engineType === "localserver") {
-      if (audioCache.has(text)) {
-        enqueueAudio(text);
-      } else {
-        pendingPlayText = text;
-        requestTTS(text, "read");
-
-        if (!isWsConnected) {
-          speakViaWebSpeech(text);
-        }
-      }
-
-      const currentIndex = subtitleTrack.findIndex(item =>
-        item.text === text || item.text.includes(text) || text.includes(item.text)
-      );
-      if (currentIndex !== -1) {
-        prefetchSubtitles(currentIndex);
-      }
-    } else {
-      speakViaWebSpeech(text);
-    }
-  }
-
+  // --- 8. Sự Kiện Video & Observer ---
   function attachVideoListeners(video) {
     if (!video || video === currentVideoElement) return;
 
     currentVideoElement = video;
 
     video.addEventListener('pause', () => {
-      if (!video.seeking) {
-        pauseAudio();
-      }
+      if (!video.seeking) pauseAudio();
     });
 
     video.addEventListener('play', () => {
-      const resumed = resumeAudio();
-      if (!resumed) {
-        // Nếu không resume được audio cũ và hàng chờ rỗng, phát phụ đề hiện tại
-        if (!isPlayingAudio && audioQueue.length === 0) {
-          const captionSegments = document.querySelectorAll('.ytp-caption-segment');
-          if (captionSegments.length > 0) {
-            const activeText = Array.from(captionSegments)
-              .map(el => el.textContent.trim())
-              .join(' ');
-            if (activeText) speakOrFetchText(activeText);
-          }
-        }
-      }
+      resumeAudio();
     });
 
     video.addEventListener('seeking', () => {
       isSeeking = true;
-      seekSessionId++;
-      pendingPlayText = null;
+      pendingTTSKey = null;
       lastSubText = "";
       stopAudio();
     });
 
     video.addEventListener('seeked', () => {
       isSeeking = false;
-    });
-  }
-
-  function observeVideoElement(onVideoFound) {
-    const existingVideo = document.querySelector('video');
-    if (existingVideo) {
-      onVideoFound(existingVideo);
-      return;
-    }
-
-    let videoObserver = new MutationObserver((mutations, observer) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const video = node.tagName === 'VIDEO' ? node : node.querySelector('video');
-            if (video) {
-              observer.disconnect();
-              onVideoFound(video);
-              return;
-            }
-          }
-        }
+      const currentTimeMs = video.currentTime * 1000;
+      
+      // Đồng bộ lại câu gần nhất theo vị trí tua video
+      if (subtitleTrack.length > 0) {
+        lastPlayedIndex = subtitleTrack.findLastIndex(item => item.start < currentTimeMs);
       }
     });
 
-    videoObserver.observe(document.documentElement, { childList: true, subtree: true });
+    startSubSyncTimer();
   }
 
-  observeVideoElement((videoNode) => {
-    attachVideoListeners(videoNode);
-  });
+  function observeVideoElement() {
+    const video = document.querySelector('video');
+    if (video) {
+      attachVideoListeners(video);
+    } else {
+      setTimeout(observeVideoElement, 500);
+    }
+  }
 
-  const observer = new MutationObserver(() => {
+  // Observer quét thẻ Subtitle DOM
+  const domObserver = new MutationObserver(() => {
+    // Nếu đã có Track Sub chuẩn từ Interceptor thì ngắt DOM Observer để tiết kiệm tài nguyên
+    if (subtitleTrack.length > 0) return;
+
     const captionSegments = document.querySelectorAll('.ytp-caption-segment');
     if (captionSegments.length > 0) {
       const fullSubtitle = Array.from(captionSegments)
         .map(el => el.textContent.trim())
         .join(' ');
 
-      processSubtitleChange(fullSubtitle);
+      processDOMSubtitleChange(fullSubtitle);
     }
   });
 
   function setupSubtitleObserver() {
-    observer.disconnect();
-
+    domObserver.disconnect();
     const targetNode = document.querySelector('.html5-video-player')
       || document.querySelector('#movie_player')
-      || document.body
-      || document.documentElement;
+      || document.body;
 
-    if (targetNode && targetNode instanceof Node) {
-      observer.observe(targetNode, { childList: true, subtree: true });
+    if (targetNode) {
+      domObserver.observe(targetNode, { childList: true, subtree: true });
     } else {
       setTimeout(setupSubtitleObserver, 500);
     }
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupSubtitleObserver);
-  } else {
-    setupSubtitleObserver();
-  }
-
-  // --- 7. Interceptor & Navigation ---
-  function injectSubtitleInterceptor() {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('src/interceptor.js');
-
-    script.onload = function () {
-      this.remove();
-    };
-
-    (document.head || document.documentElement).appendChild(script);
-  }
-
+  // --- 9. Nhận dữ liệu từ Interceptor ---
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'YT_SUBTITLES_LOADED') {
       const items = event.data.data;
       if (Array.isArray(items) && items.length > 0) {
         subtitleTrack = items;
-        if (lastSubText) {
-          const idx = subtitleTrack.findIndex(item => item.text === lastSubText || item.text.includes(lastSubText));
-          if (idx !== -1) prefetchSubtitles(idx);
-        }
+        lastPlayedIndex = -1;
+        console.log(`✅ [TTS Content] Đã nạp ${subtitleTrack.length} câu sub từ Interceptor. Chuyển sang Time-Sync Engine.`);
       }
     }
   });
 
   window.addEventListener('yt-navigate-finish', () => {
     subtitleTrack = [];
+    lastPlayedIndex = -1;
     lastSubText = "";
-    currentVideoElement = null;
     stopAudio();
+    observeVideoElement();
     setupSubtitleObserver();
   });
 
+  function injectSubtitleInterceptor() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('src/interceptor.js');
+    script.onload = function () { this.remove(); };
+    (document.head || document.documentElement).appendChild(script);
+  }
+
+  // Kích hoạt Engine
+  observeVideoElement();
+  setupSubtitleObserver();
   injectSubtitleInterceptor();
 })();
