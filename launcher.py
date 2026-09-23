@@ -1,4 +1,5 @@
 import json
+import ctypes
 import os
 import queue
 import subprocess
@@ -6,6 +7,7 @@ import sys
 import threading
 import tkinter as tk
 from collections import deque
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -20,7 +22,41 @@ except ImportError:
 APP_NAME = "YoutubeTTS"
 APP_DIR = Path(os.getenv("LOCALAPPDATA", Path.home())) / APP_NAME
 SETTINGS_PATH = APP_DIR / "launcher.json"
+PID_PATH = APP_DIR / "launcher.pid"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def show_existing_launcher():
+    try:
+        pid = int(PID_PATH.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return False
+
+    if pid <= 0 or pid == os.getpid() or os.name != "nt":
+        return False
+
+    user32 = ctypes.windll.user32
+    found = False
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def enum_window(hwnd, _):
+        nonlocal found
+        process_id = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if process_id.value != pid:
+            return True
+
+        title = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, title, len(title))
+        if title.value == "YoutubeTTS Server":
+            user32.ShowWindow(hwnd, 9)
+            user32.SetForegroundWindow(hwnd)
+            found = True
+            return False
+        return True
+
+    user32.EnumWindows(enum_window, 0)
+    return found
 
 
 class Launcher:
@@ -38,6 +74,7 @@ class Launcher:
         self.log_window = None
         self.log_text = None
         self.start_minimized = start_minimized
+        self.write_pid_file()
         settings = self.load_settings()
 
         self.use_gpu = tk.BooleanVar(value=settings.get("use_gpu", False))
@@ -277,6 +314,17 @@ class Launcher:
             return str(Path(sys.executable).resolve())
         return str(Path(__file__).resolve())
 
+    def write_pid_file(self):
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        PID_PATH.write_text(str(os.getpid()), encoding="ascii")
+
+    def remove_pid_file(self):
+        try:
+            if PID_PATH.read_text(encoding="ascii").strip() == str(os.getpid()):
+                PID_PATH.unlink()
+        except (OSError, ValueError):
+            pass
+
     def make_tray_image(self):
         image = Image.new("RGB", (64, 64), "#1769aa")
         draw = ImageDraw.Draw(image)
@@ -308,6 +356,7 @@ class Launcher:
             self.process.terminate()
         if self.tray_icon:
             self.tray_icon.stop()
+        self.remove_pid_file()
         self.root.destroy()
 
     def run(self):
@@ -315,4 +364,11 @@ class Launcher:
 
 
 if __name__ == "__main__":
-    Launcher(start_minimized="--minimized" in sys.argv).run()
+    if show_existing_launcher():
+        sys.exit(0)
+
+    launcher = Launcher(start_minimized="--minimized" in sys.argv)
+    try:
+        launcher.run()
+    finally:
+        launcher.remove_pid_file()
