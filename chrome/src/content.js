@@ -78,13 +78,14 @@
           currentIncomingId = msg.id;
         }
       } else if (event.data instanceof ArrayBuffer) {
-        if (currentIncomingId) {
+        if (currentIncomingId && event.data.byteLength > 44) {
           audioCache.set(currentIncomingId, event.data);
 
-          if (pendingPlayText === currentIncomingId) {
+          const video = currentVideoElement || document.querySelector('video');
+          if (video && !video.paused && !video.seeking) {
             playBufferedAudio(currentIncomingId);
-            pendingPlayText = null;
           }
+          pendingPlayText = null;
         }
       }
     };
@@ -156,6 +157,10 @@
 
   // --- 2. Hàm phát âm thanh hỗ trợ rate/playbackRate chuẩn ---
   let currentAudioElement = null;
+  let currentAudioUrl = null;
+  let currentVideoElement = null;
+  let isSeeking = false;
+  let seekSessionId = 0;
 
   function playBufferedAudio(textKey) {
     stopAudio();
@@ -195,19 +200,50 @@
     currentAudioElement = audio;
   }
 
+  // Tạm dừng âm thanh (giữ nguyên vị trí playback hiện tại)
+  function pauseAudio() {
+    if (currentAudioElement && !currentAudioElement.paused) {
+      currentAudioElement.pause();
+      console.log("⏸️ [TTS Audio] Đã tạm dừng Audio tại vị trí:", currentAudioElement.currentTime);
+    }
+  }
+
+  // Tiếp tục phát âm thanh từ vị trí đã tạm dừng
+  function resumeAudio() {
+    if (currentAudioElement && currentAudioElement.paused && currentAudioElement.src) {
+      const video = currentVideoElement || document.querySelector('video');
+      if (video && !video.paused) {
+        currentAudioElement.play().catch(err => console.error("[TTS Audio] Lỗi resume:", err));
+        console.log("▶️ [TTS Audio] Đã phát tiếp Audio từ vị trí cũ.");
+        return true; // Resume thành công
+      }
+    }
+    return false; // Không có audio nào để resume
+  }
+
   function stopAudio() {
     if (currentAudioElement) {
-      currentAudioElement.pause();
-      currentAudioElement.currentTime = 0;
+      try {
+        currentAudioElement.onerror = null;
+        currentAudioElement.onended = null;
+
+        currentAudioElement.pause();
+        currentAudioElement.currentTime = 0;
+        currentAudioElement.src = "";
+        currentAudioElement.load();
+      } catch (e) { }
       currentAudioElement = null;
     }
-    if (currentSourceNode) {
-      try { currentSourceNode.stop(); } catch (e) { }
-      currentSourceNode = null;
+
+    if (currentAudioUrl) {
+      URL.revokeObjectURL(currentAudioUrl);
+      currentAudioUrl = null;
     }
+
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+
     resetVolume();
   }
 
@@ -248,33 +284,110 @@
 
   // --- 6. Nhận Diện & Xử Lý Phụ Đề Trực Tiếp ---
   function processSubtitleChange(fullText) {
-    if (!enabled || !fullText || fullText === lastSubText) return;
+    const video = currentVideoElement || document.querySelector('video');
+
+    if (!enabled || !fullText || fullText === lastSubText ||
+      isSeeking || (video && video.paused)
+    ) return;
 
     lastSubText = fullText;
+    speakOrFetchText(fullText);
+  }
+
+  function speakOrFetchText(text) {
+    if (!text) return;
 
     if (engineType === "localserver") {
-      if (audioCache.has(fullText)) {
-        console.log(`⚡ [Cache Hit] Phát âm thanh pre-fetch cho: "${fullText}"`);
-        playBufferedAudio(fullText);
+      if (audioCache.has(text)) {
+        playBufferedAudio(text);
       } else {
-        console.log(`⚠️ [Cache Miss] Đang chờ server trả về câu: "${fullText}"`);
-        pendingPlayText = fullText;
-        requestTTS(fullText, "read");
+        pendingPlayText = text;
+        requestTTS(text, "read");
 
         if (!isWsConnected) {
-          speakViaWebSpeech(fullText);
+          speakViaWebSpeech(text);
         }
       }
 
-      // Tìm vị trí câu hiện tại trong danh sách SubtitleTrack để kích hoạt Pre-fetch
-      const currentIndex = subtitleTrack.findIndex(item => item.text === fullText || item.text.includes(fullText) || fullText.includes(item.text));
+      // Pre-fetch các câu tiếp theo
+      const currentIndex = subtitleTrack.findIndex(item =>
+        item.text === text || item.text.includes(text) || text.includes(item.text)
+      );
       if (currentIndex !== -1) {
         prefetchSubtitles(currentIndex);
       }
     } else {
-      speakViaWebSpeech(fullText);
+      speakViaWebSpeech(text);
     }
   }
+
+  function attachVideoListeners(video) {
+    if (!video || video === currentVideoElement) return;
+
+    currentVideoElement = video;
+
+    video.addEventListener('pause', () => {
+      if (!video.seeking) {
+        pauseAudio();
+      }
+    });
+
+    video.addEventListener('play', () => {
+      // Nếu resume không có đối tượng audio cũ, mới phát lại câu sub hiện tại
+      const resumed = resumeAudio();
+      if (!resumed) {
+        const captionSegments = document.querySelectorAll('.ytp-caption-segment');
+        if (captionSegments.length > 0) {
+          const activeText = Array.from(captionSegments)
+            .map(el => el.textContent.trim())
+            .join(' ');
+          if (activeText) speakOrFetchText(activeText);
+        }
+      }
+    });
+
+    video.addEventListener('seeking', () => {
+      isSeeking = true;
+      seekSessionId++;
+      pendingPlayText = null;
+      currentSubText = "";
+      lastSubText = "";
+      stopAudio();
+    });
+
+    video.addEventListener('seeked', () => {
+      isSeeking = false;
+    });
+  }
+
+  function observeVideoElement(onVideoFound) {
+    const existingVideo = document.querySelector('video');
+    if (existingVideo) {
+      onVideoFound(existingVideo);
+      return;
+    }
+
+    let videoObserver = new MutationObserver((mutations, observer) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const video = node.tagName === 'VIDEO' ? node : node.querySelector('video');
+            if (video) {
+              observer.disconnect();
+              onVideoFound(video);
+              return;
+            }
+          }
+        }
+      }
+    });
+
+    videoObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  observeVideoElement((videoNode) => {
+    attachVideoListeners(videoNode);
+  });
 
   // Quan sát DOM Phụ đề trên trình phát video YouTube
   const observer = new MutationObserver(() => {
@@ -348,7 +461,10 @@
   window.addEventListener('yt-navigate-finish', () => {
     subtitleTrack = [];
     lastSubText = "";
-    console.log("🔄 [TTS] Đã chuyển video YouTube mới, làm sạch bộ đệm sub.");
+    currentSubText = "";
+    currentVideoElement = null;
+    stopAudio();
+    setupSubtitleObserver();
   });
 
   injectSubtitleInterceptor();
