@@ -1,5 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
   const toggleBtn = document.getElementById('toggle-enable');
+  const sequentialQueueBtn = document.getElementById('toggle-sequential');
   const engineSelect = document.getElementById('select-engine');
   const serverInput = document.getElementById('input-serverurl');
   const wsStatusBadge = document.getElementById('ws-status-badge');
@@ -193,9 +194,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Tải cấu hình từ chrome.storage.sync
   chrome.storage.sync.get(
-    ['enabled', 'engineType', 'wsServerUrl', 'lang', 'voice', 'rate', 'pitch', 'ducking'],
+    ['enabled', 'sequentialQueue', 'engineType', 'wsServerUrl', 'lang', 'voice', 'rate', 'pitch', 'ducking'],
     (d) => {
       if (d.enabled !== undefined) toggleBtn.checked = d.enabled;
+      if (d.sequentialQueue !== undefined) sequentialQueueBtn.checked = d.sequentialQueue !== undefined ? d.sequentialQueue : true;
 
       if (d.lang) savedLang = d.lang;
       if (d.voice) savedVoice = d.voice;
@@ -225,6 +227,9 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 
   // --- Lắng nghe các sự kiện thay đổi trên giao diện UI ---
+  sequentialQueueBtn.onchange = (e) => {
+    chrome.storage.sync.set({ sequentialQueue: e.target.checked });
+  };
 
   langSelect.onchange = () => {
     savedLang = langSelect.value;

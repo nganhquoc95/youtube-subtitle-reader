@@ -10,6 +10,7 @@
   let rate = 1.0;
   let pitch = 1.0;
   let ducking = 20;
+  let sequentialQueue = true;
 
   let socket = null;
   let isWsConnected = false;
@@ -19,14 +20,21 @@
   const MAX_AUDIO_CACHE_SIZE = 30;
   let audioCache = new Map(); // Key (text) -> AudioBuffer
   let pendingPlayText = null;
-  let currentSourceNode = null;
-  let subtitleTrack = []; // Danh sách toàn bộ sub track lấy tự động
+  let subtitleTrack = []; // Danh sách toàn bộ sub track
   let lastSubText = "";
   let currentIncomingId = null;
 
+  // --- Quản lý Hàng chờ Audio Tuần tự (Queue Engine) ---
+  let audioQueue = []; 
+  let isPlayingAudio = false;
+  let currentAudioElement = null;
+  let currentVideoElement = null;
+  let isSeeking = false;
+  let seekSessionId = 0;
+
   // --- 1. Đồng bộ Cài đặt từ Chrome Storage ---
   chrome.storage.sync.get(
-    ["enabled", "engineType", "wsServerUrl", "voice", "rate", "pitch", "ducking"],
+    ["enabled", "engineType", "wsServerUrl", "voice", "rate", "pitch", "ducking", "sequentialQueue"],
     (data) => {
       enabled = data.enabled !== undefined ? data.enabled : true;
       engineType = data.engineType || "webspeech";
@@ -35,6 +43,7 @@
       rate = parseFloat(data.rate) || 1.0;
       pitch = parseFloat(data.pitch) || 1.0;
       ducking = data.ducking !== undefined ? parseInt(data.ducking) : 20;
+      sequentialQueue = data.sequentialQueue !== undefined ? data.sequentialQueue : true;
 
       if (engineType === "localserver") {
         initWebSocket();
@@ -44,6 +53,7 @@
 
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.enabled) enabled = changes.enabled.newValue;
+    if (changes.sequentialQueue) sequentialQueue = changes.sequentialQueue.newValue;
     if (changes.engineType) {
       engineType = changes.engineType.newValue;
       if (engineType === "localserver" && !socket) initWebSocket();
@@ -83,7 +93,7 @@
 
           const video = currentVideoElement || document.querySelector('video');
           if (video && !video.paused && !video.seeking) {
-            playBufferedAudio(currentIncomingId);
+            enqueueAudio(currentIncomingId);
           }
           pendingPlayText = null;
         }
@@ -103,11 +113,10 @@
     };
   }
 
-  // --- 3. Yêu cầu TTS & Thuật toán Pre-fetching ---
+  // --- 3. Yêu cầu TTS & Pre-fetching ---
   function requestTTS(text, type = "read") {
     if (!isWsConnected || audioCache.has(text) || !text) return;
 
-    console.log(`[TTS Req] Gửi yêu cầu (${type}): "${text}"`);
     socket.send(JSON.stringify({
       type: type,
       id: text,
@@ -116,15 +125,12 @@
     }));
   }
 
-  // Hàm dọn dẹp bộ nhớ cache nếu vượt ngưỡng
   function cleanupAudioCache() {
     if (audioCache.size > MAX_AUDIO_CACHE_SIZE) {
-      // Xóa bớt các câu cũ nhất trong Map
       const keysToDeleteCount = audioCache.size - MAX_AUDIO_CACHE_SIZE;
       const keys = Array.from(audioCache.keys());
 
       for (let i = 0; i < keysToDeleteCount; i++) {
-        // Tránh xóa câu hiện tại đang phát
         if (keys[i] !== lastSubText) {
           audioCache.delete(keys[i]);
         }
@@ -132,11 +138,8 @@
     }
   }
 
-  // Pre-fetch trước phụ đề tiếp theo
   function prefetchSubtitles(currentIndex) {
     if (!subtitleTrack || subtitleTrack.length === 0) return;
-
-    // Dọn dẹp cache cũ nếu đầy
     cleanupAudioCache();
 
     for (let i = 1; i <= PREFETCH_COUNT; i++) {
@@ -146,35 +149,60 @@
         const nextItem = subtitleTrack[nextIndex];
         const nextText = nextItem.text;
 
-        // Chỉ gửi request pre-fetch nếu câu này chưa có trong Cache
         if (nextText && !audioCache.has(nextText)) {
-          // console.log(`🚀 [Pre-fetch ${i}/${PREFETCH_COUNT}] Gửi request cho câu: "${nextText}"`);
           requestTTS(nextText, "prefetch");
         }
       }
     }
   }
 
-  // --- 2. Hàm phát âm thanh hỗ trợ rate/playbackRate chuẩn ---
-  let currentAudioElement = null;
-  let currentAudioUrl = null;
-  let currentVideoElement = null;
-  let isSeeking = false;
-  let seekSessionId = 0;
+  // --- 4. Queue Audio Engine (Xử lý Phát Tuần Tự hoặc Đè Trực Tiếp) ---
 
-  function playBufferedAudio(textKey) {
-    stopAudio();
+  // Đẩy câu TTS mới vào luồng phát
+  function enqueueAudio(textKey) {
+    if (sequentialQueue) {
+      // [CHẾ ĐỘ TUẦN TỰ]: Thêm vào hàng chờ nếu chưa tồn tại
+      if (!audioQueue.includes(textKey)) {
+        audioQueue.push(textKey);
+        console.log(`📥 [TTS Queue] Thêm vào hàng chờ: "${textKey}". Số câu chờ: ${audioQueue.length}`);
+      }
+      if (!isPlayingAudio) {
+        processNextInQueue();
+      }
+    } else {
+      // [CHẾ ĐỘ ĐÈ TRỰC TIẾP]: Dừng audio cũ, đọc câu mới ngay lập tức
+      stopAudio();
+      playBufferedAudioDirectly(textKey);
+    }
+  }
+
+  // Phát câu kế tiếp trong hàng chờ
+  function processNextInQueue() {
+    if (audioQueue.length === 0) {
+      isPlayingAudio = false;
+      currentAudioElement = null;
+      return;
+    }
+
+    const video = currentVideoElement || document.querySelector('video');
+    if (video && (video.paused || video.seeking)) {
+      isPlayingAudio = false;
+      return;
+    }
+
+    isPlayingAudio = true;
+    const textKey = audioQueue.shift();
 
     const arrayBuffer = audioCache.get(textKey);
-    if (!arrayBuffer) return;
+    if (!arrayBuffer) {
+      processNextInQueue();
+      return;
+    }
 
-    // 🟢 Tạo Blob đúng định dạng WAV từ ArrayBuffer nhận từ Server
     const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
     const audioUrl = URL.createObjectURL(blob);
-
     const audio = new Audio(audioUrl);
 
-    // 🟢 Áp dụng tốc độ phát (rate) ép kiểu Float rõ ràng
     const currentRate = parseFloat(rate) || 1.0;
     audio.playbackRate = currentRate;
 
@@ -182,62 +210,95 @@
 
     audio.onended = () => {
       resetVolume();
-      URL.revokeObjectURL(audioUrl); // Dọn dẹp RAM
+      URL.revokeObjectURL(audioUrl);
       audioCache.delete(textKey);
+      processNextInQueue();
     };
 
     audio.onerror = (err) => {
-      console.error("[TTS Audio] Lỗi phát file WAV:", err);
+      console.error("[TTS Queue Error]:", err);
       resetVolume();
+      URL.revokeObjectURL(audioUrl);
+      processNextInQueue();
     };
 
-    // Đảm bảo thiết lập lại rate nếu trình duyệt tự reset khi load metadata
     audio.onloadedmetadata = () => {
       audio.playbackRate = currentRate;
     };
 
-    audio.play().catch(err => console.error("[TTS Audio] Lỗi Play:", err));
+    audio.play().catch(err => {
+      console.error("[TTS Queue Play Error]:", err);
+      processNextInQueue();
+    });
+
     currentAudioElement = audio;
   }
 
-  // Tạm dừng âm thanh (giữ nguyên vị trí playback hiện tại)
+  // Phát trực tiếp (khi tắt sequentialQueue)
+  function playBufferedAudioDirectly(textKey) {
+    const arrayBuffer = audioCache.get(textKey);
+    if (!arrayBuffer) return;
+
+    const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    const audioUrl = URL.createObjectURL(blob);
+    const audio = new Audio(audioUrl);
+
+    const currentRate = parseFloat(rate) || 1.0;
+    audio.playbackRate = currentRate;
+
+    applyDucking();
+
+    audio.onended = () => {
+      resetVolume();
+      URL.revokeObjectURL(audioUrl);
+      audioCache.delete(textKey);
+      currentAudioElement = null;
+    };
+
+    audio.onerror = () => {
+      resetVolume();
+      URL.revokeObjectURL(audioUrl);
+      currentAudioElement = null;
+    };
+
+    audio.play().catch(console.error);
+    currentAudioElement = audio;
+  }
+
   function pauseAudio() {
     if (currentAudioElement && !currentAudioElement.paused) {
       currentAudioElement.pause();
-      console.log("⏸️ [TTS Audio] Đã tạm dừng Audio tại vị trí:", currentAudioElement.currentTime);
     }
   }
 
-  // Tiếp tục phát âm thanh từ vị trí đã tạm dừng
   function resumeAudio() {
     if (currentAudioElement && currentAudioElement.paused && currentAudioElement.src) {
       const video = currentVideoElement || document.querySelector('video');
       if (video && !video.paused) {
-        currentAudioElement.play().catch(err => console.error("[TTS Audio] Lỗi resume:", err));
-        console.log("▶️ [TTS Audio] Đã phát tiếp Audio từ vị trí cũ.");
-        return true; // Resume thành công
+        currentAudioElement.play().catch(console.error);
+        return true;
       }
     }
-    return false; // Không có audio nào để resume
+    return false;
   }
 
+  // Dừng & làm sạch hoàn toàn Audio lẫn Hàng chờ (dùng khi Seek, Video Pause hoặc Chuyển Trang)
   function stopAudio() {
+    // 1. Dọn dẹp hàng chờ
+    audioQueue = [];
+    isPlayingAudio = false;
+
+    // 2. Ngắt audio đang phát
     if (currentAudioElement) {
       try {
         currentAudioElement.onerror = null;
         currentAudioElement.onended = null;
-
         currentAudioElement.pause();
         currentAudioElement.currentTime = 0;
         currentAudioElement.src = "";
         currentAudioElement.load();
       } catch (e) { }
       currentAudioElement = null;
-    }
-
-    if (currentAudioUrl) {
-      URL.revokeObjectURL(currentAudioUrl);
-      currentAudioUrl = null;
     }
 
     if (window.speechSynthesis) {
@@ -282,7 +343,7 @@
     }
   }
 
-  // --- 6. Nhận Diện & Xử Lý Phụ Đề Trực Tiếp ---
+  // --- 6. Nhận Diện Phụ Đề & Bắt Sự Kiện Video ---
   function processSubtitleChange(fullText) {
     const video = currentVideoElement || document.querySelector('video');
 
@@ -299,7 +360,7 @@
 
     if (engineType === "localserver") {
       if (audioCache.has(text)) {
-        playBufferedAudio(text);
+        enqueueAudio(text);
       } else {
         pendingPlayText = text;
         requestTTS(text, "read");
@@ -309,7 +370,6 @@
         }
       }
 
-      // Pre-fetch các câu tiếp theo
       const currentIndex = subtitleTrack.findIndex(item =>
         item.text === text || item.text.includes(text) || text.includes(item.text)
       );
@@ -333,15 +393,17 @@
     });
 
     video.addEventListener('play', () => {
-      // Nếu resume không có đối tượng audio cũ, mới phát lại câu sub hiện tại
       const resumed = resumeAudio();
       if (!resumed) {
-        const captionSegments = document.querySelectorAll('.ytp-caption-segment');
-        if (captionSegments.length > 0) {
-          const activeText = Array.from(captionSegments)
-            .map(el => el.textContent.trim())
-            .join(' ');
-          if (activeText) speakOrFetchText(activeText);
+        // Nếu không resume được audio cũ và hàng chờ rỗng, phát phụ đề hiện tại
+        if (!isPlayingAudio && audioQueue.length === 0) {
+          const captionSegments = document.querySelectorAll('.ytp-caption-segment');
+          if (captionSegments.length > 0) {
+            const activeText = Array.from(captionSegments)
+              .map(el => el.textContent.trim())
+              .join(' ');
+            if (activeText) speakOrFetchText(activeText);
+          }
         }
       }
     });
@@ -350,7 +412,6 @@
       isSeeking = true;
       seekSessionId++;
       pendingPlayText = null;
-      currentSubText = "";
       lastSubText = "";
       stopAudio();
     });
@@ -389,7 +450,6 @@
     attachVideoListeners(videoNode);
   });
 
-  // Quan sát DOM Phụ đề trên trình phát video YouTube
   const observer = new MutationObserver(() => {
     const captionSegments = document.querySelectorAll('.ytp-caption-segment');
     if (captionSegments.length > 0) {
@@ -402,10 +462,8 @@
   });
 
   function setupSubtitleObserver() {
-    // Ngắt quan sát cũ (nếu có) trước khi tạo mới
     observer.disconnect();
 
-    // Ưu tiên quan sát khung phát player, nếu chưa nạp xong thì quan sát document.body
     const targetNode = document.querySelector('.html5-video-player')
       || document.querySelector('#movie_player')
       || document.body
@@ -413,42 +471,34 @@
 
     if (targetNode && targetNode instanceof Node) {
       observer.observe(targetNode, { childList: true, subtree: true });
-      console.log("🟢 [TTS] Đã gắn MutationObserver thành công trên Node:", targetNode.className || targetNode.nodeName);
     } else {
-      // Trường hợp hiếm khi DOM chưa sẵn sàng, thử lại sau 500ms
       setTimeout(setupSubtitleObserver, 500);
     }
   }
 
-  // 🟢 Kích hoạt Observer an toàn khi tải trang hoặc khi YouTube chuyển video (SPA)
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', setupSubtitleObserver);
   } else {
     setupSubtitleObserver();
   }
 
-  // --- 7. CƠ CHẾ BẮT CHẶN NETWORK (INTERCEPTOR) ĐỂ TẢI SUBTITLE TRACK ---
+  // --- 7. Interceptor & Navigation ---
   function injectSubtitleInterceptor() {
     const script = document.createElement('script');
-    // 🟢 Nạp bằng URL hợp lệ được cấp phép qua Manifest thay vì dùng Inline Script
     script.src = chrome.runtime.getURL('src/interceptor.js');
 
     script.onload = function () {
-      this.remove(); // Dọn dẹp DOM sau khi script đã nạp xong
+      this.remove();
     };
 
     (document.head || document.documentElement).appendChild(script);
   }
 
-  // Lắng nghe dữ liệu phụ đề từ script inject gửi về
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'YT_SUBTITLES_LOADED') {
       const items = event.data.data;
       if (Array.isArray(items) && items.length > 0) {
-        subtitleTrack = items; // Lưu toàn bộ mảng [{start: ..., text: ...}]
-        console.log(`✅ [TTS Pre-fetch] Đã nạp thành công ${subtitleTrack.length} câu phụ đề vào bộ nhớ!`);
-
-        // Nếu video đang chạy và đã có câu phụ đề hiện tại, kích hoạt pre-fetch ngay
+        subtitleTrack = items;
         if (lastSubText) {
           const idx = subtitleTrack.findIndex(item => item.text === lastSubText || item.text.includes(lastSubText));
           if (idx !== -1) prefetchSubtitles(idx);
@@ -457,11 +507,9 @@
     }
   });
 
-  // Lắng nghe sự kiện chuyển video của YouTube để đảm bảo Interceptor luôn hoạt động
   window.addEventListener('yt-navigate-finish', () => {
     subtitleTrack = [];
     lastSubText = "";
-    currentSubText = "";
     currentVideoElement = null;
     stopAudio();
     setupSubtitleObserver();
