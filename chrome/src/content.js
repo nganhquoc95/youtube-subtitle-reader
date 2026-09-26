@@ -39,6 +39,7 @@
     ["enabled", "engineType", "wsServerUrl", "voice", "rate", "pitch", "ducking", "sequentialQueue"],
     (data) => {
       enabled = data.enabled !== undefined ? data.enabled : true;
+      updateToggleButton();
       engineType = data.engineType || "webspeech";
       wsServerUrl = data.wsServerUrl || "ws://127.0.0.1:8000/ws/tts";
       selectedVoiceName = data.voice || "";
@@ -54,7 +55,15 @@
   );
 
   chrome.storage.onChanged.addListener((changes) => {
-    if (changes.enabled) enabled = changes.enabled.newValue;
+    if (changes.enabled) {
+      enabled = changes.enabled.newValue;
+      if (!enabled) {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        pendingTTSKey = null;
+        stopAudio();
+      }
+      updateToggleButton();
+    }
     if (changes.sequentialQueue) sequentialQueue = changes.sequentialQueue.newValue;
     if (changes.engineType) {
       engineType = changes.engineType.newValue;
@@ -184,7 +193,7 @@
       if (currentIndex !== -1) {
         lastPlayedIndex = currentIndex;
         const subItem = subtitleTrack[currentIndex];
-        
+
         console.log(`🎯 [TTS Time-Sync] Phát câu [${currentIndex}]: "${subItem.text}"`);
         speakOrFetchText(subItem.text);
         prefetchSubtitles(currentIndex);
@@ -399,6 +408,42 @@
     }
   }
 
+  function updateToggleButton() {
+    const button = document.getElementById('yt-sub-tts-toggle');
+    if (!button) return;
+
+    const stateLabel = enabled ? 'Disable' : 'Enable';
+    button.title = `${stateLabel} YouTube Subtitle TTS`;
+    button.setAttribute('aria-label', `${stateLabel} YouTube Subtitle TTS`);
+    button.setAttribute('aria-pressed', String(enabled));
+    button.style.color = enabled ? '#ff4e45' : '';
+
+    const offIndicator = button.querySelector('[data-tts-off-indicator]');
+    if (offIndicator) offIndicator.style.display = enabled ? 'none' : '';
+  }
+
+  function ensureToggleButton() {
+    const controls = document.querySelector('.html5-video-player .ytp-right-controls');
+    if (!controls || document.getElementById('yt-sub-tts-toggle')) return;
+    const captionButton = controls.querySelector('.ytp-subtitles-button');
+
+    const button = document.createElement('button');
+    button.id = 'yt-sub-tts-toggle';
+    button.className = 'ytp-button';
+    button.type = 'button';
+    button.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6l-5 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M7 8h10M7 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path data-tts-off-indicator d="m5 5 14 14" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+    button.addEventListener('click', () => {
+      chrome.storage.sync.set({ enabled: !enabled });
+    });
+
+    if (captionButton) {
+      captionButton.insertAdjacentElement('beforebegin', button);
+    } else {
+      controls.appendChild(button);
+    }
+    updateToggleButton();
+  }
+
   // --- 8. Sự Kiện Video & Observer ---
   function attachVideoListeners(video) {
     if (!video || video === currentVideoElement) return;
@@ -423,7 +468,7 @@
     video.addEventListener('seeked', () => {
       isSeeking = false;
       const currentTimeMs = video.currentTime * 1000;
-      
+
       // Đồng bộ lại câu gần nhất theo vị trí tua video
       if (subtitleTrack.length > 0) {
         lastPlayedIndex = subtitleTrack.findLastIndex(item => item.start < currentTimeMs);
@@ -444,6 +489,8 @@
 
   // Observer quét thẻ Subtitle DOM
   const domObserver = new MutationObserver(() => {
+    ensureToggleButton();
+
     // Nếu đã có Track Sub chuẩn từ Interceptor thì ngắt DOM Observer để tiết kiệm tài nguyên
     if (subtitleTrack.length > 0) return;
 
@@ -459,6 +506,7 @@
 
   function setupSubtitleObserver() {
     domObserver.disconnect();
+    ensureToggleButton();
     const targetNode = document.querySelector('.html5-video-player')
       || document.querySelector('#movie_player')
       || document.body;
